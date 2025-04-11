@@ -53,7 +53,7 @@ public:
    */
   void reinit() {}
   void reset() {}
-  
+  unsigned long get_acc_time() const { return acc_time_; }
   void clear_page()
   {
     memset(&page_, 0, sizeof(page_));

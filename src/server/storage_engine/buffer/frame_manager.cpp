@@ -53,7 +53,56 @@ Frame *FrameManager::get(int file_desc, PageNum page_num)
  */
 int FrameManager::evict_frames(int count, std::function<RC(Frame *frame)> evict_action)
 {
-  return 0;
+  if (count <= 0) {
+    return 0;
+  }
+
+  std::lock_guard<std::mutex> lock_guard(lock_);
+  
+  // 收集所有可驱逐的frame（pin_count为0的）
+  std::vector<std::pair<Frame *, FrameId>> candidates;
+  auto collect_frames = [&candidates](const FrameId &frame_id, Frame *const frame) -> bool {
+    if (frame->can_evict()) {
+      candidates.push_back(std::make_pair(frame, frame_id));
+    }
+    return true;
+  };
+  frames_.foreach(collect_frames);
+  
+  if (candidates.empty()) {
+    return 0;
+  }
+  
+  // 按照访问时间排序（LRU策略）
+  std::sort(candidates.begin(), candidates.end(), [](const auto &a, const auto &b) {
+    return a.first->get_acc_time() < b.first->get_acc_time(); // 优先淘汰最久未使用的
+  });
+  
+  int evicted = 0;
+  for (auto &candidate : candidates) {
+    if (evicted >= count) {
+      break;
+    }
+    
+    Frame *frame = candidate.first;
+    const FrameId &frame_id = candidate.second;
+    
+    // 执行驱逐前的操作（如刷脏页）
+    RC rc = evict_action(frame);
+    if (rc != RC::SUCCESS) {
+      LOG_ERROR("Failed to execute evict action on frame %s, rc=%s", 
+                to_string(*frame).c_str(), strrc(rc));
+      continue; // 跳过此frame，尝试下一个
+    }
+    
+    // 从LRU缓存中移除并释放frame
+    frames_.remove(frame_id);
+    allocator_.free(frame);
+    
+    evicted++;
+  }
+  
+  return evicted;
 }
 
 Frame *FrameManager::get_internal(const FrameId &frame_id)

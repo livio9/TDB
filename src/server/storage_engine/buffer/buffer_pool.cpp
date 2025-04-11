@@ -213,11 +213,30 @@ RC FileBufferPool::flush_page(Frame &frame)
  */
 RC FileBufferPool::flush_page_internal(Frame &frame)
 {
-//  1. 获取页面Page
-//  2. 计算该Page在文件中的偏移量
-//  3. 写入数据到文件的目标位置
-//  4. 清除frame的脏标记
-//  5. 记录和返回成功
+  // 1. 获取页面Page
+  Page &page = frame.page();
+  
+  // 2. 计算该Page在文件中的偏移量
+  int64_t offset = ((int64_t)page.page_num) * BP_PAGE_SIZE;
+  
+  // 3. 写入数据到文件的目标位置
+  if (lseek(file_desc_, offset, SEEK_SET) == -1) {
+    LOG_ERROR("Failed to seek to position %ld for page %d in file %s, error: %s",
+              offset, page.page_num, file_name_.c_str(), strerror(errno));
+    return RC::IOERR_SEEK;
+  }
+  
+  if (writen(file_desc_, &page, BP_PAGE_SIZE) != 0) {
+    LOG_ERROR("Failed to write page %d to file %s, error: %s",
+              page.page_num, file_name_.c_str(), strerror(errno));
+    return RC::IOERR_WRITE;
+  }
+  
+  // 4. 清除frame的脏标记
+  frame.clear_dirty();
+  
+  LOG_DEBUG("Flushed dirty page. file name=%s, page num=%d",
+            file_name_.c_str(), page.page_num);
   return RC::SUCCESS;
 }
 
@@ -246,6 +265,24 @@ RC FileBufferPool::flush_all_pages()
  */
 RC FileBufferPool::evict_page(PageNum page_num, Frame *buf)
 {
+  RC rc = RC::SUCCESS;
+  
+  // 对于脏页，需要先刷盘
+  if (buf->dirty()) {
+    rc = flush_page_internal(*buf);
+    if (rc != RC::SUCCESS) {
+      LOG_ERROR("Failed to flush dirty page %d before evicting. rc=%s", page_num, strrc(rc));
+      return rc;
+    }
+  }
+  
+  // 释放frame资源
+  rc = frame_manager_.free(file_desc_, page_num, buf);
+  if (rc != RC::SUCCESS) {
+    LOG_ERROR("Failed to free frame for page %d when evicting. rc=%s", page_num, strrc(rc));
+    return rc;
+  }
+  
   return RC::SUCCESS;
 }
 /**
@@ -253,7 +290,22 @@ RC FileBufferPool::evict_page(PageNum page_num, Frame *buf)
  */
 RC FileBufferPool::evict_all_pages()
 {
-  return RC::SUCCESS;
+  RC rc = RC::SUCCESS;
+  
+  // 获取所有属于该文件的frame
+  std::list<Frame *> frames = frame_manager_.find_list(file_desc_);
+  
+  // 逐个驱逐frame
+  for (Frame *frame : frames) {
+    RC tmp_rc = evict_page(frame->page_num(), frame);
+    if (tmp_rc != RC::SUCCESS) {
+      LOG_ERROR("Failed to evict page %d when evicting all pages, rc=%s", 
+                frame->page_num(), strrc(tmp_rc));
+      rc = tmp_rc; // 保存错误码，但继续尝试驱逐其他页面
+    }
+  }
+  
+  return rc;
 }
 
 /**
@@ -517,7 +569,16 @@ RC BufferPoolManager::close_file(const char *_file_name)
  */
 RC BufferPoolManager::flush_page(Frame &frame)
 {
-  return RC::SUCCESS;
+  std::scoped_lock lock_guard(lock_); // 加锁确保线程安全
+  
+  int fd = frame.file_desc();
+  auto iter = fd_buffer_pools_.find(fd);
+  if (iter == fd_buffer_pools_.end()) {
+    LOG_ERROR("Failed to find FileBufferPool with fd %d", fd);
+    return RC::INTERNAL;
+  }
+  
+  return iter->second->flush_page(frame);
 }
 
 static BufferPoolManager *default_bpm = nullptr;
