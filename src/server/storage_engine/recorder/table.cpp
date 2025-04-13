@@ -367,24 +367,63 @@ RC Table::delete_entry_of_indexes(const char *record, const RID &rid, bool error
 RC Table::insert_record(Record &record)
 {
   RC rc = RC::SUCCESS;
+  // 先向数据文件插入记录
   rc = record_handler_->insert_record(record.data(), table_meta_.record_size(), &record.rid());
   if (rc != RC::SUCCESS) {
     LOG_ERROR("Insert record failed. table name=%s, rc=%s", table_meta_.name(), strrc(rc));
     return rc;
   }
 
-  // TODO [Lab2] 增加索引的处理逻辑
+  // 插入索引项
+  rc = insert_entry_of_indexes(record.data(), record.rid());
+  if (rc != RC::SUCCESS) {  // 可能出现了键值重复
+    // 索引插入失败，需要回滚已插入的索引和数据记录
+    RC rc2 = delete_entry_of_indexes(record.data(), record.rid(), false/*error_on_not_exists*/);
+    if (rc2 != RC::SUCCESS) {
+      LOG_ERROR("Failed to rollback index data when insert index entries failed. table=%s, rc=%d:%s",
+                name(), rc2, strrc(rc2));
+    }
+    rc2 = record_handler_->delete_record(&record.rid());
+    if (rc2 != RC::SUCCESS) {
+      LOG_PANIC("Failed to rollback record data when insert index entries failed. table=%s, rc=%d:%s",
+                name(), rc2, strrc(rc2));
+    }
+    return rc;  // 将索引插入失败的错误码返回（例如 RECORD_DUPLICATE_KEY）
+  }
 
-  return rc;
+  return RC::SUCCESS;
 }
+
 
 RC Table::delete_record(const Record &record)
 {
   RC rc = RC::SUCCESS;
+  // 先删除所有索引项
+  rc = delete_entry_of_indexes(record.data(), record.rid(), true/*error_on_not_exists*/);
+  if (rc != RC::SUCCESS) {
+    // 若删除索引过程中出现严重错误，则回滚已删除的索引项（插回去）
+    if (rc != RC::RECORD_INVALID_KEY) {
+      RC rc2 = insert_entry_of_indexes(record.data(), record.rid());
+      if (rc2 != RC::SUCCESS) {
+        LOG_ERROR("Failed to rollback index data when delete index entries failed. table=%s, rc=%d:%s",
+                  name(), rc2, strrc(rc2));
+      }
+      return rc;  // 返回索引删除失败错误码
+    }
+    // 若rc是RECORD_INVALID_KEY（索引项不存在），视为非致命错误，继续执行删除记录
+  }
 
-  // TODO [Lab2] 增加索引的处理逻辑
-
+  // 删除数据记录
   rc = record_handler_->delete_record(&record.rid());
+  if (rc != RC::SUCCESS) {
+    LOG_ERROR("Delete record failed. table=%s, rc=%s", table_meta_.name(), strrc(rc));
+    // 尝试将索引项插回，以避免不一致
+    RC rc2 = insert_entry_of_indexes(record.data(), record.rid());
+    if (rc2 != RC::SUCCESS) {
+      LOG_PANIC("Failed to rollback index data when record deletion failed. table=%s, rc=%d:%s",
+                name(), rc2, strrc(rc2));
+    }
+  }
   return rc;
 }
 

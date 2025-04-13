@@ -455,6 +455,8 @@ class BplusTreeHandler
    * @param internal_max_size 内部节点最大的键值对数
    * @param leaf_max_size 叶子节点最大的键值对数
    */
+  RC search_entry(const char *multi_keys[], std::list<RID> &rids, int multi_keys_amount = 1);
+
   RC create(const char *file_name,
             bool is_unique,
             std::vector<AttrType> multi_attr_types,

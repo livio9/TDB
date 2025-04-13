@@ -90,8 +90,41 @@ RC BplusTreeIndex::close()
  */
 RC BplusTreeIndex::insert_entry(const char *record, const RID *rid)
 {
-  // TODO [Lab2] 增加索引项的处理逻辑
-  return RC::SUCCESS;
+  // 构造索引键（组合多个字段的值）
+  int key_length = 0;
+  for (const FieldMeta &fm : multi_field_metas_) {
+    key_length += fm.len();
+  }
+  char *key_data = new char[key_length];
+  int offset = 0;
+  for (const FieldMeta &fm : multi_field_metas_) {
+    memcpy(key_data + offset, record + fm.offset(), fm.len());
+    offset += fm.len();
+  }
+
+  // 如果是唯一索引，检查是否存在相同键值的记录
+  if (index_meta_.is_unique()) {
+    IndexScanner *scanner = create_scanner(key_data, key_length, true, key_data, key_length, true);
+    if (scanner == nullptr) {
+      delete[] key_data;
+      return RC::INTERNAL;  // 索引扫描器创建失败
+    }
+    RID exist_rid;
+    RC rc_scan = scanner->next_entry(&exist_rid, false);
+    scanner->destroy();
+    if (rc_scan == RC::SUCCESS) {
+      // 已存在相同键值
+      delete[] key_data;
+      return RC::RECORD_DUPLICATE_KEY;
+    }
+    // 注意：如果rc_scan不是RC::SUCCESS，也不是因为找到记录，则可能是RC::RECORD_EOF表示无重复，继续插入
+  }
+
+  // 调用B+树索引处理器插入键值
+   const char *key_ptr = key_data;  // 创建const char*指针
+  RC rc = index_handler_.insert_entry(&key_ptr, rid);
+  delete[] key_data;
+  return rc;
 }
 
 /**
@@ -100,8 +133,23 @@ RC BplusTreeIndex::insert_entry(const char *record, const RID *rid)
  */
 RC BplusTreeIndex::delete_entry(const char *record, const RID *rid)
 {
-  // TODO [Lab2] 增加索引项的处理逻辑
-  return RC::SUCCESS;
+  // 构造索引键（组合多个字段的值）
+  int key_length = 0;
+  for (const FieldMeta &fm : multi_field_metas_) {
+    key_length += fm.len();
+  }
+  char *key_data = new char[key_length];
+  int offset = 0;
+  for (const FieldMeta &fm : multi_field_metas_) {
+    memcpy(key_data + offset, record + fm.offset(), fm.len());
+    offset += fm.len();
+  }
+
+  // 调用B+树索引处理器删除键值
+  const char *key_ptr = key_data;  // 创建const char*指针
+  RC rc = index_handler_.delete_entry(&key_ptr, rid);
+  delete[] key_data;
+  return rc;
 }
 
 IndexScanner *BplusTreeIndex::create_scanner(

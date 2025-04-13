@@ -47,15 +47,46 @@ RC IndexScanPhysicalOperator::open(Trx *trx)
 RC IndexScanPhysicalOperator::next()
 {
   RID rid;
+  // 清理上次使用的页句柄
   record_page_handler_.cleanup();
-
-  // TODO [Lab2] 通过IndexScanner循环获取下一个RID，然后通过RecordHandler获取对应的Record
-  // 在现有的查询实现中，会在调用next()方法后通过current_tuple()获取当前的Tuple, 
-  // 从current_tuple()的实现中不难看出, 数据会通过current_record_传递到Tuple中并返回,
-  // 因此该next()方法的主要目的就是将recordHandler获取到的数据填充到current_record_中
-  // while(){}
-
-  return RC::SUCCESS;
+  while (true) {
+    // 获取下一个索引项对应的RID
+    RC rc = index_scanner_->next_entry(&rid, false);
+    if (rc != RC::SUCCESS) {
+      // 没有更多记录或出错，直接返回
+      return rc;
+    }
+    // 通过RecordHandler根据RID获取记录内容，填充current_record_
+    RC rc2 = table_->visit_record(rid, true/*readonly*/, [&](Record &rec) {
+      // 将记录数据拷贝到current_record_中
+      if (current_record_.data() == nullptr) {
+        // 分配缓冲区用于保存当前记录的数据
+        int record_size = table_->table_meta().record_size();
+        char *buf = (char *)malloc(record_size);
+        current_record_.set_data_owner(buf, record_size);
+      }
+      memcpy(current_record_.data(), rec.data(), table_->table_meta().record_size());
+      current_record_.set_rid(rec.rid());
+    });
+    if (rc2 != RC::SUCCESS) {
+      LOG_WARN("failed to get record by rid=%s, rc=%s", rid.to_string().c_str(), strrc(rc2));
+      // 如果获取记录失败，尝试下一条
+      continue;
+    }
+    // 将当前记录封装成RowTuple以供谓词过滤
+    tuple_._set_record(&current_record_);
+    bool matched = true;
+    RC rc_filter = filter(tuple_, matched);
+    if (rc_filter != RC::SUCCESS) {
+      return rc_filter;
+    }
+    if (!matched) {
+      // 当前记录不满足谓词，继续获取下一条
+      continue;
+    }
+    // 找到满足条件的记录
+    return RC::SUCCESS;
+  }
 }
 
 RC IndexScanPhysicalOperator::close()
