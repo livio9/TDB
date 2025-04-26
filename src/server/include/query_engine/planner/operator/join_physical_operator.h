@@ -2,16 +2,15 @@
 
 #include "physical_operator.h"
 #include "include/query_engine/structor/tuple/join_tuple.h"
+#include "include/query_engine/structor/expression/expression.h"
 
-// TODO [Lab3] join算子的头文件定义，根据需要添加对应的变量和方法
-class JoinPhysicalOperator : public PhysicalOperator
-{
+// JoinPhysicalOperator: Physical operator for executing an inner join
+class JoinPhysicalOperator : public PhysicalOperator {
 public:
-  JoinPhysicalOperator();
+  JoinPhysicalOperator(std::unique_ptr<Expression> condition);
   ~JoinPhysicalOperator() override = default;
 
-  PhysicalOperatorType type() const override
-  {
+  PhysicalOperatorType type() const override {
     return PhysicalOperatorType::JOIN;
   }
 
@@ -22,5 +21,10 @@ public:
 
 private:
   Trx *trx_ = nullptr;
-  JoinedTuple joined_tuple_;  //! 当前关联的左右两个tuple
+  std::unique_ptr<Expression> condition_;
+  PhysicalOperator *left_child_ = nullptr;
+  PhysicalOperator *right_child_ = nullptr;
+  Tuple *current_left_tuple_ = nullptr;
+  bool right_opened_ = false;
+  JoinedTuple joined_tuple_;  // 当前连接操作符输出的组合tuple
 };

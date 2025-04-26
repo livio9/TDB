@@ -90,87 +90,100 @@ unique_ptr<ConjunctionExpr> _transfer_filter_stmt_to_expr(FilterStmt *filter_stm
   return nullptr;
 }
 
-RC LogicalPlanGenerator::plan_node(
-    SelectStmt *select_stmt, unique_ptr<LogicalNode> &logical_node)
-{
+RC LogicalPlanGenerator::plan_node(SelectStmt *select_stmt, std::unique_ptr<LogicalNode> &logical_node) {
   const std::vector<Table *> &tables     = select_stmt->tables();
   const std::vector<Field *> &all_fields = select_stmt->query_fields();
   RC rc;
-
   std::unique_ptr<LogicalNode> root;
 
-  // 1. Table scan node
-  //TODO [Lab3] 当前只取一个表作为查询表,当引入Join后需要考虑同时查询多个表的情况
-  //参考思路: 遍历tables中的所有Table，针对每个table生成TableGetLogicalNode
-   Table *default_table = tables[0];
-   const char *table_name = default_table->name();
-   std::vector<Field> fields;
-   for (auto *field : all_fields) {
-     if (0 == strcmp(field->table_name(), default_table->name())) {
-       fields.push_back(*field);
-     }
-   }
+  // Determine default table (only used when there is a single table in query)
+  Table *default_table = nullptr;
+  if (tables.size() == 1) {
+    default_table = tables[0];
+  }
 
-   root = std::unique_ptr<LogicalNode>(
-       new TableGetLogicalNode(default_table, select_stmt->table_alias()[0], fields, true/*readonly*/));
+  // 1. Table scan nodes
+  if (!tables.empty()) {
+    // Build TableGetLogicalNode for the first table
+    Table *first_table = tables[0];
+    std::vector<Field> fields;
+    for (auto *field : all_fields) {
+      if (0 == strcmp(field->table_name(), first_table->name())) {
+        fields.push_back(*field);
+      }
+    }
+    root = std::make_unique<TableGetLogicalNode>(
+        first_table, select_stmt->table_alias()[0], fields, true /*readonly*/);
 
-  // 2. inner join node
-  // TODO [Lab3] 完善Join节点的逻辑计划生成, 需要解析并设置Join涉及的表,以及Join使用到的连接条件
-  // 如果只有一个TableGetLogicalNode,直接将其设置为root节点，跳过该阶段
-  // 如果有多个TableGetLogicalNode,则需要生成JoinLogicalNode进行连接
-  // 生成JoinLogicalNode可以参考下面的生成流程：
-  // * 遍历TableGetLogicalNode
-  // * 生成JoinLogicalNode, 通过select_stmt中的join_filter_stmts
-  // ps: 需要考虑table数大于2的情况
+    // 2. Inner join nodes (if multiple tables)
+    for (size_t i = 1; i < tables.size(); ++i) {
+      Table *next_table = tables[i];
+      std::vector<Field> next_fields;
+      for (auto *field : all_fields) {
+        if (0 == strcmp(field->table_name(), next_table->name())) {
+          next_fields.push_back(*field);
+        }
+      }
+      std::unique_ptr<LogicalNode> right_node = std::make_unique<TableGetLogicalNode>(
+          next_table, select_stmt->table_alias()[i], next_fields, true /*readonly*/);
+      // Retrieve ON condition expression for this join (if any)
+      FilterStmt *join_filter = select_stmt->join_filter_stmts()[i - 1];
+      std::unique_ptr<Expression> join_expr;
+      if (join_filter != nullptr) {
+        join_expr = _transfer_filter_stmt_to_expr(join_filter);
+      }
+      // Create a JoinLogicalNode and set its condition
+      std::unique_ptr<JoinLogicalNode> join_node = std::make_unique<JoinLogicalNode>();
+      if (join_expr) {
+        join_node->set_condition(std::move(join_expr));
+      }
+      // Attach left (current root) and right (next table) as children of the join node
+      join_node->add_child(std::move(root));
+      join_node->add_child(std::move(right_node));
+      // The new join node becomes the current root
+      root = std::move(join_node);
+    }
+  }
 
-
-  // 3. Table filter node
+  // 3. Table filter node (WHERE clause)
   auto *table_filter_stmt = select_stmt->filter_stmt();
-  unique_ptr<LogicalNode> predicate_node;
+  std::unique_ptr<LogicalNode> predicate_node;
   plan_node(table_filter_stmt, predicate_node);
-  if(predicate_node){
+  if (predicate_node) {
     predicate_node->add_child(std::move(root));
     root = std::move(predicate_node);
   }
 
-  // 4. aggregation node
+  // 4. Aggregation node
   std::vector<AggrExpr *> aggr_exprs;
   for (auto *expr : select_stmt->projects()) {
     AggrExpr::getAggrExprs(expr, aggr_exprs);
   }
-  if(!aggr_exprs.empty()){
-    unique_ptr<LogicalNode> aggr_node = unique_ptr<LogicalNode>(new AggrLogicalNode(aggr_exprs));
+  if (!aggr_exprs.empty()) {
+    std::unique_ptr<LogicalNode> aggr_node = std::make_unique<AggrLogicalNode>(aggr_exprs);
     aggr_node->add_child(std::move(root));
     root = std::move(aggr_node);
   }
 
   // 5. Having filter node
-  if (select_stmt->having_stmt() != nullptr) {
-    for (auto *filter_unit : select_stmt->having_stmt()->filter_units()) {
-      AggrExpr::getAggrExprs(filter_unit->left_expr(), aggr_exprs);
-      AggrExpr::getAggrExprs(filter_unit->right_expr(), aggr_exprs);
-    }
-  }
-  if (select_stmt->having_stmt() != nullptr &&
-      !select_stmt->having_stmt()->filter_units().empty()) {
-    unique_ptr<LogicalNode> having_node;
+  if (select_stmt->having_stmt() != nullptr && !select_stmt->having_stmt()->filter_units().empty()) {
+    std::unique_ptr<LogicalNode> having_node;
     plan_node(select_stmt->having_stmt(), having_node);
     having_node->add_child(std::move(root));
     root = std::move(having_node);
   }
 
-  // 6. Sort node
+  // 6. Sort (ORDER BY) node
   if (select_stmt->order_stmt() != nullptr && !select_stmt->order_stmt()->order_units().empty()) {
-    unique_ptr<LogicalNode> order_node = unique_ptr<LogicalNode>(new OrderByLogicalNode(select_stmt->order_stmt()->order_units()));
+    std::unique_ptr<LogicalNode> order_node = std::make_unique<OrderByLogicalNode>(select_stmt->order_stmt()->order_units());
     order_node->add_child(std::move(root));
     root = std::move(order_node);
   }
 
-  // 7. project node
-  unique_ptr<LogicalNode> project_logical_node =
-      unique_ptr<LogicalNode>(new ProjectLogicalNode(select_stmt->projects()));
-  project_logical_node->add_child(std::move(root));
-  root = std::move(project_logical_node);
+  // 7. Project node
+  std::unique_ptr<LogicalNode> project_node = std::make_unique<ProjectLogicalNode>(select_stmt->projects());
+  project_node->add_child(std::move(root));
+  root = std::move(project_node);
 
   logical_node.swap(root);
   return RC::SUCCESS;

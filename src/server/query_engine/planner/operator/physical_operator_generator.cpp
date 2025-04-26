@@ -32,6 +32,10 @@
 #include "include/query_engine/planner/operator/index_scan_physical_operator.h"
 #include "include/storage_engine/index/index.h"
 
+
+#include "include/query_engine/planner/operator/join_physical_operator.h"
+#include "include/query_engine/planner/node/group_by_logical_node.h"
+
 using namespace std;
 
 RC PhysicalOperatorGenerator::create(LogicalNode &logical_operator, unique_ptr<PhysicalOperator> &oper, bool is_delete)
@@ -73,7 +77,9 @@ RC PhysicalOperatorGenerator::create(LogicalNode &logical_operator, unique_ptr<P
       return create_plan(static_cast<ExplainLogicalNode &>(logical_operator), oper, is_delete);
     }
     // TODO [Lab3] 实现JoinNode到JoinOperator的转换
-    case LogicalNodeType::JOIN:
+    case LogicalNodeType::JOIN: {
+      return create_plan(static_cast<JoinLogicalNode &>(logical_operator), oper);
+    }
     case LogicalNodeType::GROUP_BY: {
       return RC::UNIMPLENMENT;
     }
@@ -359,8 +365,33 @@ RC PhysicalOperatorGenerator::create_plan(
 }
 
 // TODO [Lab3] 根据LogicalNode生成对应的PhyiscalOperator
-RC PhysicalOperatorGenerator::create_plan(
-    JoinLogicalNode &join_oper, unique_ptr<PhysicalOperator> &oper)
-{
-  return RC::UNIMPLENMENT;
+RC PhysicalOperatorGenerator::create_plan(JoinLogicalNode &join_oper, std::unique_ptr<PhysicalOperator> &oper) {
+  std::vector<std::unique_ptr<LogicalNode>> &children_nodes = join_oper.children();
+  ASSERT(children_nodes.size() == 2, "Join logical operator should have 2 children.");
+
+  // Generate physical operators for left and right child nodes
+  std::unique_ptr<PhysicalOperator> left_phy;
+  RC rc = create(*children_nodes[0], left_phy);
+  if (rc != RC::SUCCESS) {
+    LOG_WARN("failed to create left child of join operator. rc=%s", strrc(rc));
+    return rc;
+  }
+  std::unique_ptr<PhysicalOperator> right_phy;
+  rc = create(*children_nodes[1], right_phy);
+  if (rc != RC::SUCCESS) {
+    LOG_WARN("failed to create right child of join operator. rc=%s", strrc(rc));
+    return rc;
+  }
+
+  // Transfer the join condition expression from logical to physical operator
+  std::unique_ptr<Expression> join_expr;
+  if (join_oper.condition() != nullptr) {
+    join_expr = std::move(join_oper.condition());
+  }
+
+  // Create the JoinPhysicalOperator and attach left and right children
+  oper = std::make_unique<JoinPhysicalOperator>(std::move(join_expr));
+  oper->add_child(std::move(left_phy));
+  oper->add_child(std::move(right_phy));
+  return RC::SUCCESS;
 }
