@@ -114,8 +114,17 @@ MvccTrx::MvccTrx(MvccTrxManager &kit, int32_t trx_id) : trx_kit_(kit), trx_id_(t
 RC MvccTrx::insert_record(Table *table, Record &record)
 {
   RC rc = RC::SUCCESS;
-  // TODO [Lab4] 需要同学们补充代码实现记录的插入，相关提示见文档
-
+  // 设置新插入记录的事务ID范围：begin_xid标记为当前事务的负ID，end_xid标记为最大事务ID
+  Field begin_xid_field, end_xid_field;
+  trx_fields(table, begin_xid_field, end_xid_field);
+  begin_xid_field.set_int(record, -trx_id_);
+  end_xid_field.set_int(record, trx_kit_.max_trx_id());
+  // 插入记录到表
+  rc = table->insert_record(record);
+  if (rc != RC::SUCCESS) {
+    return rc;
+  }
+  // 将该插入操作记录到事务操作集合
   pair<OperationSet::iterator, bool> ret = operations_.insert(Operation(Operation::Type::INSERT, table, record.rid()));
   if (!ret.second) {
     rc = RC::INTERNAL;
@@ -127,27 +136,62 @@ RC MvccTrx::insert_record(Table *table, Record &record)
 RC MvccTrx::delete_record(Table *table, Record &record)
 {
   RC rc = RC::SUCCESS;
-  // TODO [Lab4] 需要同学们补充代码实现逻辑上的删除，相关提示见文档
-
+  // 获取事务版本字段
+  Field begin_xid_field, end_xid_field;
+  trx_fields(table, begin_xid_field, end_xid_field);
+  int begin_xid = begin_xid_field.get_int(record);
+  int end_xid = end_xid_field.get_int(record);
+  // 检查是否有其他事务未提交对当前记录的插入或删除，若有则产生冲突
+  if ((begin_xid < 0 && begin_xid != -trx_id_) ||
+      (end_xid < 0 && end_xid != -trx_id_)) {
+    return RC::LOCKED_CONCURRENCY_CONFLICT;
+  }
+  // 将记录标记为删除状态：设置end_xid为当前事务的负ID（begin_xid保持不变）
+  auto record_updater = [this, &end_xid_field](Record &rec) {
+    end_xid_field.set_int(rec, -trx_id_);
+  };
+  rc = table->visit_record(record.rid(), false/*readonly*/, record_updater);
+  if (rc != RC::SUCCESS) {
+    return rc;
+  }
+  // 将该删除操作记录到事务操作集合
   operations_.insert(Operation(Operation::Type::DELETE, table, record.rid()));
-  return rc;
+  return RC::SUCCESS;
 }
 
-/**
-   * @brief 当访问到某条数据时，使用此函数来判断是否可见，或者是否有访问冲突
-   * @param table    要访问的数据属于哪张表
-   * @param record   要访问哪条数据
-   * @param readonly 是否只读访问
-   * @return RC      - SUCCESS 成功
-   *                 - RECORD_INVISIBLE 此数据对当前事务不可见，应该跳过
-   *                 - LOCKED_CONCURRENCY_CONFLICT 与其它事务有冲突
- */
 RC MvccTrx::visit_record(Table *table, Record &record, bool readonly)
 {
   RC rc = RC::SUCCESS;
-  // TODO [Lab4] 需要同学们补充代码实现记录是否可见的判断，相关提示见文档
-
-  return rc;
+  // 获取记录的事务版本信息
+  Field begin_xid_field, end_xid_field;
+  trx_fields(table, begin_xid_field, end_xid_field);
+  int begin_xid = begin_xid_field.get_int(record);
+  int end_xid = end_xid_field.get_int(record);
+  // 若为非只读访问，检测未提交数据的写冲突
+  if (!readonly) {
+    if ((begin_xid < 0 && begin_xid != -trx_id_) ||
+        (end_xid < 0 && end_xid != -trx_id_)) {
+      // 其他事务对该记录有未提交的插入或删除，发生并发冲突
+      return RC::LOCKED_CONCURRENCY_CONFLICT;
+    }
+  }
+  // 其他事务未提交插入的记录，对当前事务不可见
+  if (begin_xid < 0 && begin_xid != -trx_id_) {
+    return RC::RECORD_INVISIBLE;
+  }
+  // 其他事务未提交删除的记录，对当前事务仍可见（视作尚未删除）
+  if (end_xid < 0 && end_xid != -trx_id_) {
+    end_xid = trx_kit_.max_trx_id();
+  }
+  // 当前事务删除的记录对自身不可见
+  if (end_xid < 0 && end_xid == -trx_id_) {
+    return RC::RECORD_INVISIBLE;
+  }
+  // 根据版本范围判断可见性：当前事务ID需在 [begin_xid, end_xid) 范围内
+  if (begin_xid > trx_id_ || trx_id_ >= end_xid) {
+    return RC::RECORD_INVISIBLE;
+  }
+  return RC::SUCCESS;
 }
 
 RC MvccTrx::start_if_need()
