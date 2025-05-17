@@ -1,0 +1,11 @@
+curl "http://101.6.41.168:8000/submit" -X POST -F "file=@/home/livioliu/Desktop/2021010964_刘一含_hw2.zip" -F "student_id=2021010964" -F "token=67253afd09c7c6485919b1e7556528ab"
+curl "http://101.6.41.168:8000/get_score?lab_id=2&student_id=2021010964&token=67253afd09c7c6485919b1e7556528ab"
+
+
+
+curl "http://101.6.41.168:8000/submit" -X POST -F "file=@/home/livioliu/Desktop/2021010964_刘一含_lab3.zip" -F "student_id=2021010964" -F "token=67253afd09c7c6485919b1e7556528ab"
+curl "http://101.6.41.168:8000/get_score?lab_id=3&student_id=2021010964&token=67253afd09c7c6485919b1e7556528ab"
+
+
+curl "http://101.6.41.168:8000/submit" -X POST -F "file=@/home/livioliu/Desktop/2021010964_刘一含_lab4.zip" -F "student_id=2021010964" -F "token=67253afd09c7c6485919b1e7556528ab"
+curl "http://101.6.41.168:8000/get_score?lab_id=4&student_id=2021010964&token=67253afd09c7c6485919b1e7556528ab"
